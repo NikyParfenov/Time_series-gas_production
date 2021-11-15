@@ -11,45 +11,6 @@ import matplotlib.pyplot as plt
 
 
 # Main calculation functions
-
-def own_trend_converter(df: pd.DataFrame,
-                        date_col: str = 'Дата',
-                        field_col: str = 'Месторождение',
-                        days_col: str = 'Дни') -> pd.DataFrame:
-    """
-    Function converts yearly trend data (analytical production forecast) to the daily one with linear approximation
-    between values (function used in case of trend exceptions!)
-
-    :param df:        Data Frame with 'int' year "YYYY" (or middle of year "YYYY-07-DD"), trend values and field name
-    :param date_col:  Column name with date
-    :param field_col: Column name for group (field)
-    :param days_col:  Column name with days
-
-    :return:          Data Frame with own trend data prepared for trend_chooser function
-    """
-
-    # Check for date column input
-    if df[date_col].dtype != 'datetime64[ns]':
-        # Converting yearly 'int' data to datetime
-        df[date_col] = (df[date_col] - 1970).astype('datetime64[Y]')
-
-    start_year = df[date_col].dt.year.iloc[0]
-    end_year = df[date_col].dt.year.iloc[-1]
-
-    # Creating table with converted dates
-    own_trends = pd.DataFrame(data=pd.date_range(f'01-01-{start_year}',
-                                                 f'31-12-{end_year}',
-                                                 freq='D').date,
-                              columns=[date_col], dtype='datetime64[ns]')
-
-    own_trends = pd.merge(own_trends, df, how='left', on=date_col)
-    own_trends = own_trends.interpolate(method='ffill', limit_direction='forward')
-    own_trends[field_col].ffill(inplace=True)
-    own_trends[days_col] = (own_trends[date_col] - own_trends[date_col].iloc[0]).dt.days
-
-    return own_trends
-
-
 def trend_chooser(x_input: np.ndarray,
                   y_input: np.ndarray,
                   x0: int = 0,
@@ -248,7 +209,8 @@ def change_point_finder(x_input: np.ndarray,
 
 def variation(result: pd.DataFrame,
               residuals: pd.DataFrame,
-              alpha: float = 0.05,
+              approx_alpha: float = 0.01,
+              noise_alpha: float = 0.05,
               approx_variation: bool = False,
               monthly_variation: bool = True,
               var_param_top: int = 2,
@@ -257,7 +219,8 @@ def variation(result: pd.DataFrame,
     Function added self series noise and approximation error variations according to distribution of residuals
 
     :param result:            Data Frame with month column and approximation values
-    :param alpha:             Allowed error in statistical accuracy (default=0.05)
+    :param approx_alpha:      Allowed approx error in statistical accuracy (default=0.01)
+    :param noise_alpha:      Allowed noise in statistical accuracy (default=0.05)
     :param residuals:         Residuals for confident interval estimation: assumed (Y_true - Y_approx) for bootstrap
                               and assumed (Y_true - Y_moving_average) for self noise
     :param approx_variation:  If "True" - use quantiles for approximation error estimation relying on the last series
@@ -275,20 +238,20 @@ def variation(result: pd.DataFrame,
     if approx_variation:
         calc_single_noise = False
 
-        high_col_name = f'Approx_error_quantile_{1 - alpha / 2}'
-        low_col_name = f'Approx_error_quantile_{alpha / 2}'
+        high_col_name = f'Approx_error_quantile_{1 - approx_alpha / 2}'
+        low_col_name = f'Approx_error_quantile_{approx_alpha / 2}'
 
         # In the case of monthly lack of data, use whole series for error
-        if (len(residuals.groupby('Month').quantile(alpha / 2)) < 12) or (not monthly_variation):
-            result[high_col_name] = residuals['Residuals'].quantile(1 - alpha / 2)
-            result[low_col_name] = residuals['Residuals'].quantile(alpha / 2)
+        if (len(residuals.groupby('Month').quantile(approx_alpha / 2)) < 12) or (not monthly_variation):
+            result[high_col_name] = residuals['Residuals'].quantile(1 - approx_alpha / 2)
+            result[low_col_name] = residuals['Residuals'].quantile(approx_alpha / 2)
 
         # Otherwise, use monthly distribution of approximation errors with some moving average (uniform_filter1d) for
         # bottom interval and more strong gaussian smoothing for top interval
         else:
-            quantile_low = uniform_filter1d(residuals.groupby('Month')['Residuals'].quantile(alpha / 2),
+            quantile_low = uniform_filter1d(residuals.groupby('Month')['Residuals'].quantile(approx_alpha / 2),
                                             size=var_param_low, mode='wrap')
-            quantile_high = gaussian_filter1d(residuals.groupby('Month')['Residuals'].quantile(1 - alpha / 2),
+            quantile_high = gaussian_filter1d(residuals.groupby('Month')['Residuals'].quantile(1 - approx_alpha / 2),
                                               sigma=var_param_top, mode='wrap')
             quantile_df = pd.DataFrame(data={'Month': [i+1 for i in range(12)],
                                              low_col_name: quantile_low.flatten(),
@@ -301,17 +264,19 @@ def variation(result: pd.DataFrame,
     # Self series noise (t-statistic)
     else:
         calc_single_noise = True
-        delta = t.ppf(1 - alpha / 2, df=len(residuals))
+        delta = t.ppf(1 - noise_alpha / 2, df=len(residuals))
         result['Series_STD'] = residuals['Residuals'].values.std()
-        result[f'Series_T-stat_{1-alpha}'] = delta
+        result[f'Series_T-stat_{1 - noise_alpha}'] = delta
 
     # Calculation of random variation relying on self time series noise
     if calc_single_noise:
         # Try to restrict residuals relying on chosen alpha excluding outliers (for better noise visualization)
         try:
             restricted_residuals = residuals['Residuals'].values[
-                np.where((residuals['Residuals'].values > np.quantile(residuals['Residuals'].values, alpha / 2)) &
-                         (residuals['Residuals'].values < np.quantile(residuals['Residuals'].values, 1 - alpha / 2)))]
+                np.where((residuals['Residuals'].values > np.quantile(residuals['Residuals'].values,
+                                                                      noise_alpha / 2)) &
+                         (residuals['Residuals'].values < np.quantile(residuals['Residuals'].values,
+                                                                      1 - noise_alpha / 2)))]
         except ValueError:
             restricted_residuals = residuals['Residuals'].values
 
@@ -369,35 +334,11 @@ def build_final_approx(x_input: np.ndarray,
     :return:              Return values for trend and approximation, and values for prediction period (if available)
     """
 
-    # EXCEPTIONS - if it has it's own trend use it forecast for trend approximation
-    if ('own_trend' in exceptions.keys()) and \
-            (len(exceptions['own_trend'].loc[exceptions['own_trend'][field_col] == field, :])):
-
-        own_trend = own_trend_converter(exceptions['own_trend'].loc[
-                                        exceptions['own_trend'][field_col] == field, :],
-                                        date_col, field_col, days_col)
-
-        trend_df = own_trend.loc[(own_trend[days_col] > x_input[-1]) &
-                                 (own_trend[days_col] <= x_input[-1] + prediction),
-                                 [target_col, days_col]]
-
-        # Trend X and Y expanded to prediction period
-        x_tr = np.append(x_input, trend_df[days_col].values)
-        y_tr = np.append(y_input, trend_df[target_col].values)
-
-    else:
-        # If there is no trend analytical forecast
-        x_tr = x_input
-        y_tr = y_input
-
     # Check for change points existence
     if np.all(~np.isnan(change_points)):
 
         # Array of intervals creation. Approximation will be fitted for each one
         cp = np.sort(np.concatenate((change_points, [0, len(x_input)]), axis=None))
-
-        # Trend intervals is longer to 'delta' and use for trend approximation at the last part of time series
-        cp_tr = np.sort(np.concatenate((change_points, [0, len(x_tr)]), axis=None))
 
         # Arrays of results for trend and summary approximations
         y_trend = np.array([])
@@ -418,8 +359,8 @@ def build_final_approx(x_input: np.ndarray,
                 _y_approx = np.array([simple_approx for _ in range(len(x_input[cpi:cp[i + 1]]))])
 
             else:
-                _y_trend, trend_func, trend_popt = trend_chooser(x_tr[cpi:cp_tr[i + 1]],
-                                                                 y_tr[cpi:cp_tr[i + 1]],
+                _y_trend, trend_func, trend_popt = trend_chooser(x_input[cpi:cp[i + 1]],
+                                                                 y_input[cpi:cp[i + 1]],
                                                                  x0, return_y=True)
 
                 # EXCEPTIONS - fix last trend of time series according to it's own trend forecast
@@ -450,13 +391,7 @@ def build_final_approx(x_input: np.ndarray,
             y_approx = np.array([simple_approx for _ in range(len(x_input))])
 
         else:
-            y_trend, trend_func, trend_popt, = trend_chooser(x_tr, y_tr, x0, return_y=True)
-
-            # EXCEPTIONS - fix last trend of time series according to it's own trend forecast
-            if ('own_trend' in exceptions.keys()) and \
-                    (len(exceptions['own_trend'].loc[exceptions['own_trend'][field_col] == field, :])):
-                fix_trend = True
-
+            y_trend, trend_func, trend_popt, = trend_chooser(x_input, y_input, x0, return_y=True)
             y_approx, params = approx_ts_by_fourier(x_input, x0, y_input, trend_func,
                                                     fourier_order, fix_trend, *trend_popt)
 

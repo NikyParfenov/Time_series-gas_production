@@ -17,11 +17,12 @@ def time_series_approximation(df_input: pd.DataFrame,
                               changepoint_padding: int = 584,
                               changepoint_graph: bool = False,
                               add_noise: bool = True,
-                              alpha: float = 0.05,
+                              approx_alpha: float = 0.01,
+                              noise_alpha: float = 0.05,
                               noise_window: int = 7,
                               monthly_variation: bool = True,
-                              var_param_top: int = 3,
-                              var_param_low: int = 2,
+                              var_param_top: int = 2,
+                              var_param_low: int = 3,
                               zeroing: bool = True,
                               picture: bool = True,
                               silent: bool = False,
@@ -31,7 +32,7 @@ def time_series_approximation(df_input: pd.DataFrame,
                               exceptions: dict = {}) -> (np.ndarray, np.ndarray):
     """
     Function approximate time series relying on fitting the trend function (linear, logarithmic, hyperbolic) and Fourier
-    approximation of chosen N-order. The input data should contains date, group column (field) and target (production).
+    approximation of choosen N-order. The input data should contains date, group column (field) and target (production).
     The output is Data Frame with date, approximated values of target and statistics for calculation approximation
     error, like t-statistic and STD of self-noise (standart distribution) and chosen quantiles of bootstrap errors.
 
@@ -51,7 +52,8 @@ def time_series_approximation(df_input: pd.DataFrame,
     :param changepoint_graph:   Whether plot graphs for each intervals (useful for tuning, default=False)
 
         **Noise options**
-    :param alpha:               The error for statistical confident interval estimation (default=0.05)
+    :param approx_alpha:        The error for approx error statistical confident interval estimation (default=0.01)
+    :param noise_alpha:         The error for noise statistical confident interval estimation (default=0.05)
     :param noise_window:        Moving average window for data self noise estimation
     :param monthly_variation:   Allows to split approximation errors into month groups (if the monthly data is enough)
     :param var_param_top:       Gaussian smoothing window for upper boundary of approximation error estimation
@@ -71,7 +73,6 @@ def time_series_approximation(df_input: pd.DataFrame,
                                 Has the next fixed structure:
                                 exceptions = {'change_points': {field: [...], ...},
                                               'simple_approximations': {field: np.mean/np.median, ...},
-                                              'own_trend': {field: <data frame name with trend points>, ...},
                                               }
 
     :return:                    Output Data Frame contains: date, month, approximation, standart deviations relying on
@@ -181,21 +182,27 @@ def time_series_approximation(df_input: pd.DataFrame,
             resid_approx = pd.DataFrame(data={'Month': df[date_col][change_points[-1]:].dt.month,
                                               'Residuals': y[change_points[-1]:] - y_approx[change_points[-1]:]})
         else:
-            margin = int(np.round(0.1 * len(df[date_col][x0:])))
+            # Restriction for approximate error estimation (last 5 years)
+            margin = 0 if len(df[date_col][x0:]) < 5 * 365 else int(np.round(len(df[date_col][x0:]) - 5 * 365))
             resid_approx = pd.DataFrame(data={'Month': df[date_col][x0 + margin:].dt.month,
                                              'Residuals': y[x0 + margin:] - y_approx[x0 + margin:]})
 
         # Build variations relying on residuals above
         result = variation(result, resid_noise,
-                           alpha=alpha,
+                           approx_alpha=approx_alpha,
+                           noise_alpha=noise_alpha,
                            approx_variation=False)
 
         result = variation(result, resid_approx,
-                           alpha=alpha,
+                           approx_alpha=approx_alpha,
+                           noise_alpha=noise_alpha,
                            approx_variation=True,
                            monthly_variation=monthly_variation,
                            var_param_top=var_param_top,
                            var_param_low=var_param_low)
+
+        if trend_list:
+            pass
 
         # Zeroing y < 0 and periods before start point 'x0'
         if zeroing:
@@ -206,17 +213,11 @@ def time_series_approximation(df_input: pd.DataFrame,
             result.loc[result['Trend'] < 0, 'Trend'] = 0
 
         if not silent:
-
-            # EXCEPTIONS - own trend usage informing
-            if ('own_trend' in exceptions.keys()) and \
-                    (len(exceptions['own_trend'].loc[exceptions['own_trend'][field_col] == field, :])):
-                print('Use analytical trend points forecast')
-
             # Show metrics
             metrics_calc(y[x0:], result['Approximation'].iloc[x0:len(result)-prediction].values)
 
         # Plot graph with approximation
         if picture:
-            ts_graphic(y, result, field, date_col, target_col, days_col, prediction, alpha)
+            ts_graphic(y, result, field, date_col, target_col, days_col, prediction, approx_alpha, noise_alpha)
 
         return result

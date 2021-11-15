@@ -67,20 +67,22 @@ def ts_graphic(y_true: np.ndarray,
                target_col: str,
                days_col: str,
                prediction: int = 0,
-               alpha: float = 0.05) -> None:
+               approx_alpha: float = 0.01,
+               noise_alpha: float = 0.05) -> None:
     """
     Function for plotting time series approximation with trends
 
-    :param y_true:      Values of time series
-    :param result:      Data Frame with approximations
-    :param field:       The name of field
-    :param prediction:  Forecast period
-    :param alpha:       Allowed error in statistical accuracy (default=0.05)
-    :param date_col:    Column name with date
-    :param target_col:  Column name with target (production)
-    :param days_col:    Column name with days
+    :param y_true:       Values of time series
+    :param result:       Data Frame with approximations
+    :param field:        The name of field
+    :param prediction:   Forecast period
+    :param approx_alpha: Allowed approx error in statistical accuracy (default=0.01)
+    :param noise_alpha: Allowed noise in statistical accuracy (default=0.05)
+    :param date_col:     Column name with date
+    :param target_col:   Column name with target (production)
+    :param days_col:     Column name with days
 
-    :return:            Plot with time series approximation
+    :return:             Plot with time series approximation
     """
     x_ts = result[date_col].iloc[:len(result)-prediction].values
     y_approx = (result['Approximation'] + result['Single_Noise']).iloc[:len(result)-prediction].values
@@ -89,8 +91,8 @@ def ts_graphic(y_true: np.ndarray,
 
     x_predict = result[date_col].iloc[-prediction:].values
     y_predict = result['Approximation'].iloc[-prediction:].values
-    conf_int = (result[f'Series_T-stat_{1 - alpha}'] * result['Series_STD']).iloc[-prediction:].values
-    graph_top = y_predict + result[f'Approx_error_quantile_{1 - alpha / 2}'].iloc[-prediction:].values
+    conf_int = (result[f'Series_T-stat_{1 - noise_alpha}'] * result['Series_STD']).iloc[-prediction:].values
+    graph_top = y_predict + result[f'Approx_error_quantile_{1 - approx_alpha / 2}'].iloc[-prediction:].values
 
     plt.figure(figsize=(14, 6))
     plt.scatter(x_ts, y_true, edgecolors='lightsteelblue', alpha=0.5, label='Time Series')
@@ -101,11 +103,11 @@ def ts_graphic(y_true: np.ndarray,
     # Plot prediction with variations (if available)
     if prediction:
         plt.fill_between(x_predict,
-                         y_predict + result[f'Approx_error_quantile_{alpha / 2}'].iloc[-prediction:].values,
-                         y_predict + result[f'Approx_error_quantile_{1 - alpha / 2}'].iloc[-prediction:].values,
-                         color='lightgrey', label=f'Approx error {int(100 * (1 - alpha))}% interval', alpha=0.5)
+                         y_predict + result[f'Approx_error_quantile_{approx_alpha / 2}'].iloc[-prediction:].values,
+                         y_predict + result[f'Approx_error_quantile_{1 - approx_alpha / 2}'].iloc[-prediction:].values,
+                         color='lightgrey', label=f'Approx error {int(100 * (1 - approx_alpha))}% interval', alpha=0.5)
         plt.fill_between(x_predict, y_predict + conf_int, y_predict - conf_int,
-                         color='orange', label=f'Confident {int(100 * (1 - alpha))}% interval', alpha=0.5)
+                         color='orange', label=f'Confident {int(100 * (1 - noise_alpha))}% interval', alpha=0.5)
         plt.plot(x_predict, y_predict,
                  color='red', linewidth=1, linestyle='dashed',
                  label=f'Prediction on {prediction} days', alpha=0.7)
