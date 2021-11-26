@@ -60,10 +60,14 @@ compressors <- coord_compressors %>%
   st_cast("MULTIPOINT")
 
 # Compressors graph
+normalize <- function(x, k = 4, na.rm = TRUE) {
+  return ( as.numeric(unlist((k-1) * (x-min(x))/(max(x)-min(x)) + 1 )))
+  }
 graph_compressors = readxl::read_excel("./Coordinates/Graph.xlsx", sheet="Graph")
 graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Начало'), by.y=c('Compressor')) %>% rename(c('lat_begin'='Latitude', 'lon_begin'='Longitude'))
 graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Конец'), by.y=c('Compressor')) %>% rename(c('lat_end'='Latitude', 'lon_end'='Longitude'))
 graph_compressors <- subset(graph_compressors, lat_begin != 0 & lat_end != 0)
+graph_compressors <- mutate(graph_compressors, stroke=normalize(graph_compressors['Годовая производительность, млрд м3']))
 
 # Pipes connected with fields
 coord_pipes_to_field = readxl::read_excel("./Coordinates/Pipelines_coords_to_field.xlsx")
@@ -145,16 +149,18 @@ ui <- dashboardPage(
                 width = '95%'
     ),
     
-    dateRangeInput("daterange",
-                   label ='',
-                   start = min(data$Дата),
-                   end = max(data$Дата)
-    ),
+    checkboxGroupInput("ugss_display",
+                       "Отображение ЕСГ:",
+                       c("Газопроводы" = "pipe", "Графовая  структура" = "graph"),
+                       selected = 'pipe',
+    ),    
+    
     tags$head(tags$style(HTML(type = "text/css", ".shiny-html-output .shiny-table {font-size: 14pt; margin-left: 25px; }")),
               tags$style(HTML(type = "text/css", ".table .shiny-table {padding-left: 25px; }")),
               tags$style(HTML(type = "text/css", ".shiny-loader-output-container {height: 150px; }")),
-              tags$style(HTML(type = "text/css", "#table_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 35px; margin-top: 30px;}")),
-              tags$style(HTML(type = "text/css", "#hist_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 35px; }")),
+              tags$style(HTML(type = "text/css", "#ugss_display-label {font-weight: bold; font-size: 14pt; color: lightskyblue; }")),
+              tags$style(HTML(type = "text/css", "#table_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 30px; margin-top: 25px;}")),
+              tags$style(HTML(type = "text/css", "#hist_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 30px; }")),
               tags$style(HTML(type = "text/css", "#hist {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-left: 13px; }")),
     ),
     
@@ -491,66 +497,102 @@ server <- function(input, output, session) {
         auto_highlight = TRUE,
         layer_id = "scatter_layer",
         update_view = F,
-      ) %>%
-      add_scatterplot(
-        data = compressors,
-        lat = "Latitude",
-        lon = "Longitude",
-        radius = 20000,
-        fill_colour = "#ffff00",
-        auto_highlight = TRUE,
-        layer_id = "compressor_layer",
-        update_view = F,
-      ) %>%
+      )  %>%
       add_path(
         data = traces,
         stroke_colour = '#57b9ff', 
-        width_scale = 1,
+        stroke_width = 1,
         layer_id = "pipe_layer",
         update_view = F,
-      ) %>%
+      ) 
+  })
+
+  # Event connected with chosen UGSS display option and chosen field (transportation path color)
+  observeEvent({
+    input$ugss_display
+    input$field}, {
+      
+    # Condition for displaying of different options
+    if ('pipe' %in% input$ugss_display) {
+      pipe_width = 1
+      mapdeck_update(map_id = 'map') %>%
+        add_path(
+          data = traces,
+          stroke_colour = '#57b9ff', 
+          stroke_width = 1,
+          layer_id = "pipe_layer",
+          update_view = F,
+        ) %>%
+        add_path(
+          data = chosen_pipes_to_field(),
+          stroke_colour = '#ffa947', #'#ff5f49', 
+          width_scale = 2,
+          layer_id = "chosen_pipeline",
+          update_view = F,
+        )
+    } else {  
+      pipe_width = 0
+      mapdeck_update(map_id = 'map') %>%
+        clear_path("pipe_layer") %>%    
+        clear_path("chosen_pipeline")
+    } 
+    
+    if ('graph' %in% input$ugss_display) {
+      graph_width = 1
+      mapdeck_update(map_id = 'map') %>%
+        add_scatterplot(
+          data = compressors,
+          lat = "Latitude",
+          lon = "Longitude",
+          radius = 13000,
+          stroke_opacity = 0,
+          fill_opacity = 0,
+          fill_colour = "#ffff00",
+          auto_highlight = TRUE,
+          layer_id = 'graph_layer',
+          update_view = F)
+    } else {
+      graph_width = 0
+      mapdeck_update(map_id = 'map') %>%
+        clear_scatterplot('graph_layer') 
+    }
+      
+    graph_compressors$stroke <- graph_compressors$stroke * 2 * graph_width
+    
+    # Due-to mapdeck can't clear animated layers (assume bug), animations are hiding by multiplication width and opacity to zero values
+    mapdeck_update(map_id = 'map') %>%
       add_trips(
         data = traces,
         stroke_colour = '#00bfff',
-        stroke_width = 5,
+        stroke_width = 5 * pipe_width,
         layer_id = "pipe_layer_animation",
-        opacity = 0.5,
+        opacity = 0.5 * pipe_width,
         trail_length = 60,
         start_time = 0,
         end_time = 90,
         animation_speed = 30
       ) %>%
       add_animated_line(
-        data = graph_compressors
-        , layer_id = "graph_layer_animated"
-        , origin = c('lon_begin', 'lat_begin')
-        , destination = c('lon_end', 'lat_end')
-        , stroke_colour = "#ff5f49"
-        , stroke_width = 3
-        , trail_length = 1
-        , animation_speed = 0.1
-        , update_view = F
-      )
-  })
-  
-  observeEvent({input$field}, {
-    mapdeck_update(map_id = 'map') %>%
+        data = graph_compressors, 
+        layer_id = "graph_layer_animation", 
+        origin = c('lon_begin', 'lat_begin'), 
+        destination = c('lon_end', 'lat_end'), 
+        stroke_colour = "#ff7a5c", 
+        stroke_width = 'stroke', 
+        stroke_opacity = 1 * graph_width,
+        trail_length = 0.7,
+        animation_speed = 0.1, 
+        update_view = F,
+      ) %>%
       add_polygon(
         data = chosen_field(),
         layer_id = "chosen_polygon",
         fill_colour = '#ff5f49',
         elevation = 1,
         update_view = F,
-      ) %>%
-      add_path(
-        data = chosen_pipes_to_field(),
-        stroke_colour = '#ff5f49', 
-        width_scale = 2,
-        layer_id = "chosen_pipeline",
-        update_view = F,
-      )
-  }) 
-  
+      ) 
+  }, ignoreNULL=FALSE)
+
 }
 
 shinyApp(ui, server)
