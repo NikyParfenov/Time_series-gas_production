@@ -11,11 +11,13 @@ library(lubridate)
 library(plotly)
 library(mapdeck)
 library(sf)
+library(sp)
 library(jsonlite)
 library(DT)
 library(reticulate)
 library(ramify)
 library(mc2d)
+library(R.oo)
 
 # Add python abilities
 reticulate::use_python("py38")
@@ -29,12 +31,47 @@ os$listdir(".")
 
 # MAIN PRODUCTION APPROXIMATION, FORECAST AND PERT DISTR. SCRIPT
 #py_run_file('Main.py')
-pert_distr <- import("pert_func")
+# pert_distr <- import("pert_func")
+
+pert_distr <- function(a, c, b=NaN, mu=NaN, lamb=4, amount=100000) {
+  if (!is.nan(mu) & is.nan(b)) {
+    b = (mu * (lamb + 2) - a - c) / lamb
+  }
+  
+  if (a == c) {
+    a = b - 0.001 * b
+    c = b + 0.001 * b
+  }
+  
+  while (b > c) {
+    lamb = lamb + 1
+    b = (mu * (lamb + 2) - a - c) / lamb
+  }
+  
+  while (b < a) {
+    lamb = lamb - 1
+    b = (mu * (lamb + 2) - a - c) / lamb
+  }
+  
+  out <- tryCatch(
+    {
+      pert  <-  rpert(amount, min=a, mode=b, max=c, shape=lamb)
+    },
+    error=function(e) {
+      pert = NaN
+      print('Error in b/mu parameter')
+    })
+  return(pert)
+}
 
 # Add negative 'in' for more convenience
 `%!in%` <- Negate(`%in%`)
 
 # BLOCK OF COORDINATES PREPARING
+# Regions coordinates
+regions = readRDS("./Coordinates/russia_map_clean_simple.rds")
+regions <- st_as_sf(regions[1])
+
 # Field coordinates
 coordinates = readxl::read_excel("./Coordinates/Fields_coords.xlsx")
 polygon <- coordinates %>%
@@ -78,9 +115,10 @@ pipes_to_field <- coord_pipes_to_field %>%
   st_cast("LINESTRING")
 
 # Point coordinates (companies and some industrial systems)
-coord_companies = readxl::read_excel("./Coordinates/Companies_coords.xlsx")
-coord_comp <- coord_companies %>%
-  group_by(Месторождение) %>%
+coord_ugsys = readxl::read_excel("./Coordinates/UGS_coords.xlsx")
+coord_ugs <- coord_ugsys %>%
+  # group_by(Месторождение) %>%
+  group_by(ПХГ) %>%
   st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
   summarise(geometry = st_combine(geometry)) %>%
   st_cast("MULTIPOINT")
@@ -150,8 +188,10 @@ ui <- dashboardPage(
     ),
     
     checkboxGroupInput("ugss_display",
-                       "Отображение ЕСГ:",
-                       c("Газопроводы" = "pipe", "Графовая  структура" = "graph"),
+                       "Отображение элементов:",
+                       c("Газопроводы"="pipe", 
+                         "Графовая  структура"="graph", 
+                         "Регионы РФ"="regions"),
                        selected = 'pipe',
     ),    
     
@@ -159,8 +199,8 @@ ui <- dashboardPage(
               tags$style(HTML(type = "text/css", ".table .shiny-table {padding-left: 25px; }")),
               tags$style(HTML(type = "text/css", ".shiny-loader-output-container {height: 150px; }")),
               tags$style(HTML(type = "text/css", "#ugss_display-label {font-weight: bold; font-size: 14pt; color: lightskyblue; }")),
-              tags$style(HTML(type = "text/css", "#table_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 30px; margin-top: 25px;}")),
-              tags$style(HTML(type = "text/css", "#hist_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 30px; }")),
+              tags$style(HTML(type = "text/css", "#table_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 10px; }")),
+              tags$style(HTML(type = "text/css", "#hist_name {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-top: 25px; }")),
               tags$style(HTML(type = "text/css", "#hist {font-weight: bold; font-size: 14pt; color: lightskyblue; padding-left: 13px; }")),
     ),
     
@@ -269,10 +309,10 @@ server <- function(input, output, session) {
   df_hist <- reactive({
     rbind(
       data.frame(
-        x = pert_distr$pert_function(a=(temp()$Min)[1] / 1000, c=(temp()$Max)[1] / 1000, mu=(temp()$Mean)[1] / 1000, amount=1000000), 
+        x = pert_distr(a=(temp()$Min)[1] / 1000, c=(temp()$Max)[1] / 1000, mu=(temp()$Mean)[1] / 1000, amount=1000000), 
         y = c(rep(temp()$prod_period[1], 1000000))),
       data.frame(
-        x = pert_distr$pert_function(a=(temp()$Min)[2] / 1000, c=(temp()$Max)[2] / 1000, mu=(temp()$Mean)[2] / 1000, amount=1000000), 
+        x = pert_distr(a=(temp()$Min)[2] / 1000, c=(temp()$Max)[2] / 1000, mu=(temp()$Mean)[2] / 1000, amount=1000000), 
         y = c(rep(temp()$prod_period[2], 1000000)))
     )
 })    
@@ -473,6 +513,9 @@ server <- function(input, output, session) {
     }
   })
 
+  # current_zoom <- eventReactive({input$map_view_change}, {input$map_view_change$zoom})
+  # observeEvent({input$map_view_change}, {message(current_zoom())})
+  
   set_token('pk.eyJ1IjoibmlreXBhcmZlbm92IiwiYSI6ImNrdGw1d3RtczA1NDYyd3A2dTd3M3M4ajYifQ.YhQLodjnRi2A2Kgch8KKgA')
   output$map <- renderMapdeck({
     mapdeck(style = mapdeck_style('dark'),
@@ -489,11 +532,11 @@ server <- function(input, output, session) {
         update_view = F,
       ) %>%
       add_scatterplot(
-        data = coord_comp,
+        data = coord_ugs,
         lat = "Latitude",
         lon = "Longitude",
-        radius = 10000,
-        fill_colour = "#ff8c00",
+        radius = 15000 ,
+        fill_colour = '#e0b3ff',# "#c9a0dc", # "#ff8c00",
         auto_highlight = TRUE,
         layer_id = "scatter_layer",
         update_view = F,
@@ -544,7 +587,7 @@ server <- function(input, output, session) {
           data = compressors,
           lat = "Latitude",
           lon = "Longitude",
-          radius = 13000,
+          radius = 10000,
           stroke_opacity = 0,
           fill_opacity = 0,
           fill_colour = "#ffff00",
@@ -555,6 +598,22 @@ server <- function(input, output, session) {
       graph_width = 0
       mapdeck_update(map_id = 'map') %>%
         clear_scatterplot('graph_layer') 
+    }
+      
+    if ('regions' %in% input$ugss_display) {
+      mapdeck_update(map_id = 'map') %>%
+        add_polygon(
+          data = regions,
+          layer_id = "regions",
+          stroke_width = 1000,
+          stroke_colour = "#ff77ff",
+          fill_opacity = 0,
+          auto_highlight = F,
+          update_view = F,
+        )
+    } else {
+      mapdeck_update(map_id = 'map') %>%
+        clear_polygon('regions') 
     }
       
     graph_compressors$stroke <- graph_compressors$stroke * 2 * graph_width
