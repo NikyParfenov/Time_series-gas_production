@@ -18,41 +18,38 @@ library(reticulate)
 library(ramify)
 library(mc2d)
 library(R.oo)
+require(visNetwork, quietly = TRUE)
 
 # Add python abilities
 reticulate::use_python("py38")
 py_available()
 
 # Change project directory
-getwd()
-setwd("~/Documents/Time_Series_Approximation")
-os <- import("os")
-os$listdir(".")
+# getwd()
+# setwd("~/Documents/Time_Series_Approximation")
+# os <- import("os")
+# os$listdir(".")
 
 # MAIN PRODUCTION APPROXIMATION, FORECAST AND PERT DISTR. SCRIPT
-#py_run_file('Main.py')
+# py_run_file('Main.py')
 # pert_distr <- import("pert_func")
 
 pert_distr <- function(a, c, b=NaN, mu=NaN, lamb=4, amount=100000) {
   if (!is.nan(mu) & is.nan(b)) {
     b = (mu * (lamb + 2) - a - c) / lamb
   }
-  
   if (a == c) {
     a = b - 0.001 * b
     c = b + 0.001 * b
   }
-  
   while (b > c) {
     lamb = lamb + 1
     b = (mu * (lamb + 2) - a - c) / lamb
   }
-  
   while (b < a) {
     lamb = lamb - 1
     b = (mu * (lamb + 2) - a - c) / lamb
   }
-  
   out <- tryCatch(
     {
       pert  <-  rpert(amount, min=a, mode=b, max=c, shape=lamb)
@@ -64,13 +61,49 @@ pert_distr <- function(a, c, b=NaN, mu=NaN, lamb=4, amount=100000) {
   return(pert)
 }
 
+LatLongToMerc <- function(lon, lat)
+{
+  rLat = lat * pi / 180;
+  rLong = lon * pi / 180;
+  a = 6378137.0;
+  b = 6356752.3142;
+  f = (a - b) / a;
+  e = sqrt(2 * f - f^2);
+  X = a * rLong;
+  Y = a * log(tan(pi / 4 + rLat / 2) * ((1 - e * sin(rLat))/(1 + e * sin(rLat)))^(e / 2));
+  return(list('x' = X, 'y' = Y));
+}
+
 # Add negative 'in' for more convenience
 `%!in%` <- Negate(`%in%`)
 
 # BLOCK OF COORDINATES PREPARING
 # Regions coordinates
-regions = readRDS("./Coordinates/russia_map_clean_simple.rds")
-regions <- st_as_sf(regions[1])
+regions <- readRDS("./Coordinates/sf_russia_map_clean_simple.rds")
+
+region_centroids_file <- readxl::read_excel("./Coordinates/macro_graph.xlsx", sheet = 'coords')
+graph_regions_file = readxl::read_excel("./Coordinates/macro_graph.xlsx", sheet="graph") 
+
+graph_regions <- merge(graph_regions_file, region_centroids_file, by.x=c('Start'), by.y=c('Region')) %>% 
+  rename(c('lat_begin'='Latitude', 'lon_begin'='Longitude'))
+graph_regions <- merge(graph_regions, region_centroids_file, by.x=c('End'), by.y=c('Region')) %>% 
+  rename(c('lat_end'='Latitude', 'lon_end'='Longitude'))
+graph_regions <- subset(graph_regions, lat_begin != 0 & lat_end != 0) %>%
+  mutate(x_begin = LatLongToMerc(graph_regions$lon_begin, graph_regions$lat_begin)$x,
+         y_begin = LatLongToMerc(graph_regions$lon_begin, graph_regions$lat_begin)$y,
+         x_end = LatLongToMerc(graph_regions$lon_end, graph_regions$lat_end)$x,
+         y_end = LatLongToMerc(graph_regions$lon_end, graph_regions$lat_end)$y) %>%
+  mutate(Distance = sqrt((x_begin-x_end)^2 + (y_begin-y_end)^2))
+
+region_centroids <- region_centroids_file %>%
+  group_by(Region) %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("MULTIPOINT") %>%
+  merge(region_centroids_file, by.x=c('Region'), by.y=c('Region'))
+region_centroids <- mutate(region_centroids, 
+                           x = LatLongToMerc(region_centroids$Longitude,region_centroids$Latitude)$x,
+                           y = LatLongToMerc(region_centroids$Longitude,region_centroids$Latitude)$y)
 
 # Field coordinates
 coordinates = readxl::read_excel("./Coordinates/Fields_coords.xlsx")
@@ -91,7 +124,7 @@ traces <- coord_pipes %>%
 # Compressors coordinates
 coord_compressors = readxl::read_excel("./Coordinates/Graph.xlsx", sheet="Compressors")
 compressors <- coord_compressors %>%
-  group_by(Compressor) %>%
+  group_by(Compressor, Name) %>%
   st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
   summarise(geometry = st_combine(geometry)) %>%
   st_cast("MULTIPOINT")
@@ -101,10 +134,12 @@ normalize <- function(x, k = 4, na.rm = TRUE) {
   return ( as.numeric(unlist((k-1) * (x-min(x))/(max(x)-min(x)) + 1 )))
   }
 graph_compressors = readxl::read_excel("./Coordinates/Graph.xlsx", sheet="Graph")
-graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Начало'), by.y=c('Compressor')) %>% rename(c('lat_begin'='Latitude', 'lon_begin'='Longitude'))
-graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Конец'), by.y=c('Compressor')) %>% rename(c('lat_end'='Latitude', 'lon_end'='Longitude'))
-graph_compressors <- subset(graph_compressors, lat_begin != 0 & lat_end != 0)
-graph_compressors <- mutate(graph_compressors, stroke=normalize(graph_compressors['Годовая производительность, млрд м3']))
+graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Начало'), by.y=c('Compressor')) %>% 
+  rename(c('lat_begin'='Latitude', 'lon_begin'='Longitude'))
+graph_compressors <- merge(graph_compressors, coord_compressors, by.x=c('Конец'), by.y=c('Compressor')) %>%
+  rename(c('lat_end'='Latitude', 'lon_end'='Longitude')) 
+graph_compressors <- subset(graph_compressors, lat_begin != 0 & lat_end != 0) %>%
+  mutate(graph_compressors, stroke=normalize(graph_compressors['Годовая производительность, млрд м3']))
 
 # Pipes connected with fields
 coord_pipes_to_field = readxl::read_excel("./Coordinates/Pipelines_coords_to_field.xlsx")
@@ -117,8 +152,7 @@ pipes_to_field <- coord_pipes_to_field %>%
 # Point coordinates (companies and some industrial systems)
 coord_ugsys = readxl::read_excel("./Coordinates/UGS_coords.xlsx")
 coord_ugs <- coord_ugsys %>%
-  # group_by(Месторождение) %>%
-  group_by(ПХГ) %>%
+  group_by(ПХГ, Name) %>%
   st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
   summarise(geometry = st_combine(geometry)) %>%
   st_cast("MULTIPOINT")
@@ -134,7 +168,8 @@ data <- mutate(data, Дата = as.Date(Дата))
 data <- data %>% mutate(Combine_prod = if_else(is.na(Добыча), Approximation, Добыча))
 data <- data %>% mutate(Месторождение = if_else(Месторождение == 'Независимые производители', 'Независимые произв.', Месторождение))
 colnames(data)[9:10] <- c('approx_err_low', 'approx_err_high')
-data <- data %>% mutate(Combine_prod_low = if_else(is.na(Добыча), Approximation + approx_err_low, Добыча)) %>% mutate(Combine_prod_low = if_else(Combine_prod_low < 0, 0, Combine_prod_low))
+data <- data %>% mutate(Combine_prod_low = if_else(is.na(Добыча), Approximation + approx_err_low, Добыча)) %>% 
+  mutate(Combine_prod_low = if_else(Combine_prod_low < 0, 0, Combine_prod_low))
 data <- data %>% mutate(Combine_prod_high = if_else(is.na(Добыча), Approximation + approx_err_high, Добыча))
 
 
@@ -159,10 +194,10 @@ colnames(consumption)[9:10] <- c('approx_err_low', 'approx_err_high')
 
 
 # Trends list obtained by analytical calculations
-trends <- read.csv('Production_forecast.csv')
+# trends <- read.csv('Production_forecast.csv')
 
 
-
+#===============================================================================================================================
 # !!! SHINY APPLICATION !!!
 ui <- dashboardPage(
   dashboardHeader(title = "Добыча в ЕСГ"),
@@ -171,21 +206,28 @@ ui <- dashboardPage(
     tags$head(tags$style(HTML(type = "text/css", "#sidebarCollapsed {margin-left: 5px; }")),
               tags$style(HTML(type = "text/css", ".item {font-size: 16px; }")),
               tags$style(HTML(type = "text/css", ".selectize-dropdown.single.plugin-selectize-plugin-a11y {font-size: 16px; }"))
-    ),
+    ),  
+
     selectInput("field",
                 label ='',
                 choices = unique(field_order$Месторождение)
     ),
+
+    sidebarMenu(
+      id = "tabs",
+      menuItem(strong("Детальная карта", style = 'padding-left: 10px;'), tabName = "detailed_map", icon = icon("map")),
+      menuItem(strong("Макро-граф", style = 'padding-left: 10px;'), tabName = "macro_graph", icon = icon("sitemap"))
+    ),
     
-    tags$head(tags$style(HTML(type = "text/css", ".irs--shiny .irs-handle {width: 16px; height: 16px; top: 20px; }"))
-    ),
-    sliderInput("dateslider",
-                label ='',
-                value = c(min(data$Дата), max(data$Дата)),
-                min = min(data$Дата),
-                max = max(data$Дата),
-                width = '95%'
-    ),
+#    tags$head(tags$style(HTML(type = "text/css", ".irs--shiny .irs-handle {width: 16px; height: 16px; top: 20px; }"))
+#    ),
+#    sliderInput("dateslider",
+#                label ='',
+#                value = c(min(data$Дата), max(data$Дата)),
+#                min = min(data$Дата),
+#                max = max(data$Дата),
+#                width = '95%'
+#    ),
     
     checkboxGroupInput("ugss_display",
                        "Отображение элементов:",
@@ -208,7 +250,7 @@ ui <- dashboardPage(
     fluidRow(withLoader(tableOutput("stat_table"), type='html', loader='loader3')),
     
     textOutput("hist_name"),
-    fluidRow(withLoader(plotOutput("hist"), type='html', loader='loader3'))
+    fluidRow(withLoader(plotOutput("hist", height = 320), type='html', loader='loader3'))
     
   ),
   dashboardBody(
@@ -216,43 +258,51 @@ ui <- dashboardPage(
               tags$style(HTML(type = "text/css", '.irs--shiny .irs-grid-text { color: #fffbfb; }')),
               tags$style(HTML(type = "text/css", ".content-wrapper {background-color: #222d32 }"))
     ),
-    
-    fluidRow(
-      column(12, mapdeckOutput(outputId = 'map', height = 600),
-             
-             fluidRow(
-               column(6, withLoader(plotlyOutput("plot_single_graph", height = 300), type='html', loader='loader3')),
-               column(6, withLoader(plotlyOutput("plot_total_graph", height = 300), type='html', loader='loader3'))
-             )
-      )
+    tabItems(
+      tabItem(tabName = "detailed_map",
+              fluidRow(
+                column(12, mapdeckOutput(outputId = 'map', height = 600),
+                       
+                       fluidRow(
+                         column(6, withLoader(plotlyOutput("plot_single_graph", height = 300), type='html', loader='loader3')),
+                         column(6, withLoader(plotlyOutput("plot_total_graph", height = 300), type='html', loader='loader3'))
+                       )
+                )
+              )
+      ),
+      tabItem(tabName = "macro_graph",
+              h2('Here should be a macro-graph... soon...', style = 'color: white; text-align: center; vertical-align: middle;'),
+              withLoader(visNetworkOutput("macro_graph_visnetwork", height = 820), type='html', loader='loader5')
+              )
     )
+    
   )
 )
-
+#===============================================================================================================================
 server <- function(input, output, session) {
   
   reactdelay <- 1
-  change_dateslider <- reactiveVal(Sys.time())
-  change_daterange <- reactiveVal(Sys.time())
+#  change_dateslider <- reactiveVal(Sys.time())
+#  change_daterange <- reactiveVal(Sys.time())
   
-  observeEvent(input$dateslider, {
-    if (difftime(Sys.time(), change_dateslider()) > reactdelay) {
-      change_daterange(Sys.time())
-      updateDateRangeInput(session,
-                           "daterange",
-                           start = input$dateslider[[1]],
-                           end = input$dateslider[[2]])
-    }
-  })
+#  observeEvent(input$dateslider, {
+#    if (difftime(Sys.time(), change_dateslider()) > reactdelay) {
+#      change_daterange(Sys.time())
+#      updateDateRangeInput(session,
+#                           "daterange",
+#                           start = input$dateslider[[1]],
+#                           end = input$dateslider[[2]])
+#    }
+#  })
   
-  observeEvent(input$daterange, {
-    if (difftime(Sys.time(), change_daterange()) > reactdelay) {
-      change_dateslider(Sys.time())
-      updateSliderInput(session,
-                        "dateslider",
-                        value = c(input$daterange[[1]], input$daterange[[2]]))
-    }
-  })
+#  observeEvent(input$daterange, {
+#    if (difftime(Sys.time(), change_daterange()) > reactdelay) {
+#      change_dateslider(Sys.time())
+#      updateSliderInput(session,
+#                        "dateslider",
+#                        value = c(input$daterange[[1]], input$daterange[[2]]))
+#    }
+#  })
   
   
   df_field <- reactive({ 
@@ -260,7 +310,8 @@ server <- function(input, output, session) {
   })
   
   df_field_slider <- reactive({
-    subset(df_field(), Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
+    subset(data, Месторождение == input$field)
+    # subset(df_field()), Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
   })
   
   cons_field <- reactive({ 
@@ -268,7 +319,8 @@ server <- function(input, output, session) {
   })
   
   cons_field_slider <- reactive({
-    subset(cons_field(), Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
+    subset(consumption, Месторождение == input$field)
+    # subset(cons_field()), Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
   })
   
   # TABLE WITH STATISTICS
@@ -363,9 +415,9 @@ server <- function(input, output, session) {
     subset(cons_field_slider(), Дата >= df_field()$Дата[nrow(df_field())-prediction])
   })
   # Trends subdata
-  sub_trend <- reactive({
-    subset(trends, Месторождение == input$field & Дата >= input$dateslider[1] & Дата <= input$dateslider[2] & Дата >= df_field()$Дата[nrow(df_field())-prediction])
-  })
+  #sub_trend <- reactive({
+  #  subset(trends, Месторождение == input$field & Дата >= df_field()$Дата[nrow(df_field())-prediction]) # & Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
+  #})
   
   output$plot_single_graph <- renderPlotly({
     plot_ly() %>% 
@@ -389,8 +441,8 @@ server <- function(input, output, session) {
       add_trace(data = sub_prod_predict(), x = ~Дата, y = ~Approximation,
                 name = paste0('Добыча'), type="scatter", mode = 'lines', line = list(width = 2, color = 'rgb(29, 172, 214)')) %>% 
       
-      add_trace(data = sub_trend(), x = ~Дата, y = ~Добыча,
-                name = 'ЦКР', type='scatter', mode='lines', line = list(color = '#926eae', width = 2, dash='dot')) %>%
+      #add_trace(data = sub_trend(), x = ~Дата, y = ~Добыча,
+      #          name = 'ЦКР', type='scatter', mode='lines', line = list(color = '#926eae', width = 2, dash='dot')) %>%
       
       layout(title = list(text = "Профиль добычи", y = 0.96, x = 0.47, xanchor = 'center', yanchor =  'top', font=list(color='white')),
              paper_bgcolor="#222d32",
@@ -443,11 +495,11 @@ server <- function(input, output, session) {
   
   # SUMMARY PLOT (RIGHT)
   subdata_top <- reactive({ 
-    subset(data[data$Месторождение %in% top_data[1:4,]$Месторождение,], Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
+    subset(data[data$Месторождение %in% top_data[1:4,]$Месторождение,]) #, Дата >= input$dateslider[1] & Дата <= input$dateslider[2])
   })
   
   subdata_low_prod <- reactive({ 
-    subset(data[data$Месторождение %in% top_data[5:nrow(top_data),]$Месторождение,], Дата >= input$dateslider[1] & Дата <= input$dateslider[2]) %>% 
+    subset(data[data$Месторождение %in% top_data[5:nrow(top_data),]$Месторождение,]) %>% #, Дата >= input$dateslider[1] & Дата <= input$dateslider[2]) %>% 
       group_by(Дата) %>% summarise(Добыча = sum(Добыча), Approximation = sum(Approximation), Combine_prod = sum(Combine_prod)) %>% mutate(Дата = as.Date(Дата))
   })
   
@@ -457,7 +509,7 @@ server <- function(input, output, session) {
   })
   
   subdata_independent <- reactive({
-    subset(data[data$Месторождение %in% list('Независимые произв.', 'Нефтяные компании'),], Дата >= input$dateslider[1] & Дата <= input$dateslider[2]) #%>% 
+    subset(data[data$Месторождение %in% list('Независимые произв.', 'Нефтяные компании'),]) #, Дата >= input$dateslider[1] & Дата <= input$dateslider[2]) #%>% 
   })
   
   output$plot_total_graph <- renderPlotly({
@@ -530,6 +582,7 @@ server <- function(input, output, session) {
         auto_highlight = TRUE,
         highlight_colour = '#ff5f49cc',
         update_view = F,
+        tooltip = 'Месторождение',
       ) %>%
       add_scatterplot(
         data = coord_ugs,
@@ -540,6 +593,7 @@ server <- function(input, output, session) {
         auto_highlight = TRUE,
         layer_id = "scatter_layer",
         update_view = F,
+        tooltip = 'Name',
       )  %>%
       add_path(
         data = traces,
@@ -593,7 +647,9 @@ server <- function(input, output, session) {
           fill_colour = "#ffff00",
           auto_highlight = TRUE,
           layer_id = 'graph_layer',
-          update_view = F)
+          update_view = F,
+          tooltip = 'Compressor',
+          )
     } else {
       graph_width = 0
       mapdeck_update(map_id = 'map') %>%
@@ -610,10 +666,25 @@ server <- function(input, output, session) {
           fill_opacity = 0,
           auto_highlight = F,
           update_view = F,
-        )
+        ) %>%
+        add_scatterplot(
+          data = region_centroids,
+          lat = "Latitude",
+          lon = "Longitude",
+          radius = 20000,
+          stroke_width = 7000,
+          stroke_colour = "#ff77ff",
+          fill_opacity = 0,
+          auto_highlight = F,
+          layer_id = "regions_centroids",
+          update_view = F,
+          tooltip = 'Region',
+        ) 
     } else {
       mapdeck_update(map_id = 'map') %>%
-        clear_polygon('regions') 
+        clear_polygon('regions') %>%
+        clear_scatterplot('regions_centroids') %>%
+        clear_line('graph_regions')
     }
       
     graph_compressors$stroke <- graph_compressors$stroke * 2 * graph_width
@@ -651,7 +722,58 @@ server <- function(input, output, session) {
         update_view = F,
       ) 
   }, ignoreNULL=FALSE)
-
+  
+  # MACRO GRAPH (VisNetwork)
+  output$macro_graph_visnetwork <- renderVisNetwork({
+    nodes <- rbind(data.frame(id=region_centroids$Region,
+                              label=region_centroids$Region, 
+                              group=c('Region'),
+                              x = region_centroids$x / 10000, 
+                              y = -region_centroids$y / 10000),
+                   data.frame(id=coord_compressors$Compressor,
+                              label=coord_compressors$Compressor,
+                              group=c('Compressor'),
+                              x = LatLongToMerc(coord_compressors$Longitude, coord_compressors$Latitude)$x / 10000,
+                              y = - LatLongToMerc(coord_compressors$Longitude, coord_compressors$Latitude)$y / 10000)
+                              )
+                   
+    edges <- data.frame(from=graph_regions$Start,
+                        to=graph_regions$End)
+    visNetwork(nodes, edges, width = "100%", height = "100%") %>%
+      visIgraphLayout() %>%
+      visNodes(x = 'x',
+               y = 'y') %>%
+      visEdges(color=list(hover='orange', 
+                          highlight='orange',
+                          color='#57b9ff'),
+               arrows='middle') %>%
+      visGroups(groupname = "Region", 
+                size = 20,
+                font = list(color = "#30d5c8"),
+                color = list(background="#D2E5FF",
+                             border='#2B7CE9',
+                             hover=list(background='orange',
+                                        border='red'),
+                             highlight=list(background='orange',
+                                            border='red')
+                             )
+                ) %>% 
+      visGroups(groupname = "Compressor", 
+                size = 10,
+                font = list(color = "white"),
+                color = list(background="yellow",
+                             border='orange',
+                             hover=list(background='orange',
+                                        border='red'),
+                             highlight=list(background='orange',
+                                            border='red')
+                            )
+                ) %>% 
+      visInteraction(hover = TRUE) %>%
+      visEvents(hoverNode = "function(nodes) {
+        Shiny.onInputChange('current_node_id', nodes);
+      ;}")
+    })
 }
 
 shinyApp(ui, server)
