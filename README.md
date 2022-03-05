@@ -12,4 +12,4 @@ Map objects have graph structure for pipeflows optimization (graph example below
 ![Pic2](https://user-images.githubusercontent.com/63195531/146538298-5ed37169-523d-4bb8-9684-69e5eb84c3ce.PNG)
 
 In addition there is a macro-graph in the dashboard for region-scale calculations
-![Pic3](https://user-images.githubusercontent.com/63195531/146538387-4bcccbd5-a5bc-4c9b-9ebf-c7beffb5c7f1.PNG)
+![Pic3_new](https://user-images.githubusercontent.com/63195531/156900040-952ed67a-6d22-4e7c-8dec-84c50715329c.PNG)
